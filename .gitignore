@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+*.db
+relayer-keypair.json
+data/
+.DS_Store
