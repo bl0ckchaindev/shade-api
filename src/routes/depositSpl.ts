@@ -16,13 +16,13 @@ interface DepositSplRequestBody {
 
 router.post('/', async (req, res) => {
   try {
+    if (typeof req.body !== 'object' || req.body === null || Array.isArray(req.body)) {
+      return res.status(400).json({ error: 'Invalid request body' });
+    }
     const { signedTransaction, senderAddress, mintAddress } = req.body as DepositSplRequestBody;
-    console.log('sender Address', senderAddress)
-    console.log('mint Address', mintAddress)  
     if (!signedTransaction || !senderAddress || !mintAddress) {
       return res.status(400).json({ error: 'signedTransaction, senderAddress, and mintAddress are required' });
     }
-
     if (!isValidBase64(signedTransaction, MAX_TX_SIZE)) {
       return res.status(400).json({ error: 'Invalid transaction' });
     }
@@ -40,10 +40,10 @@ router.post('/', async (req, res) => {
       maxRetries: 3,
     });
 
-    res.json({ signature, success: true });
+    return res.json({ signature, success: true });
   } catch (error: unknown) {
     console.error('Deposit SPL relay error:', error);
-    res.status(500).json({ error: 'Failed to relay deposit' });
+    return res.status(500).json({ error: 'Failed to relay deposit' });
   }
 });
 

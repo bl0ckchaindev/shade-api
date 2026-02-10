@@ -34,9 +34,17 @@ router.get(
 
       const total = totalCount ?? 0;
       const list = rows ?? [];
+      // Only include non-empty encrypted_output so clients get decryptable entries
+      const encrypted_outputs = list
+        .map((r) => (r as { encrypted_output?: string | null }).encrypted_output)
+        .filter((eo): eo is string => typeof eo === 'string' && eo.length > 0);
+
+      if (list.length > 0 && encrypted_outputs.length < list.length) {
+        console.warn(`[utxos/range] token=${token} start=${start} end=${end}: ${list.length} rows, ${encrypted_outputs.length} with encrypted_output (${list.length - encrypted_outputs.length} null/empty)`);
+      }
 
       res.json({
-        encrypted_outputs: list.map((r) => r.encrypted_output),
+        encrypted_outputs,
         total,
         hasMore: list.length >= MAX_RANGE_SIZE || end < total,
         len: list.length,

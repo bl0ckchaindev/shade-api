@@ -13,7 +13,7 @@ import { isValidBase64, isValidSolanaAddress } from '../lib/validators.js';
 
 const router = Router();
 
-/** Return relayer public key so the frontend can use it as senderAddress for withdraw-by-note (no wallet). */
+/** Relayer public key for note-based withdraw: client sends build params with senderAddress = relayer; API signs and submits. */
 router.get('/relayer-address', (_req, res) => {
   const keypair = getRelayerKeypair();
   if (!keypair) {
@@ -126,43 +126,11 @@ function validateWithdrawBuildParams(body: WithdrawRequestBody): string | null {
   return null;
 }
 
-/** Withdraw using only the note – no wallet sign. Relayer decrypts (when supported), builds and submits. */
-interface WithdrawByNoteBody {
-  noteContent?: string;
-  recipient?: string;
-  token?: string;
-  amount?: number;
-}
-
-router.post('/by-note', async (req, res) => {
-  try {
-    const body = req.body as WithdrawByNoteBody;
-    if (!body.noteContent || typeof body.noteContent !== 'string' || body.noteContent.trim().length === 0) {
-      return res.status(400).json({ error: 'Missing or invalid noteContent' });
-    }
-    if (!body.recipient || !isValidSolanaAddress(body.recipient)) {
-      return res.status(400).json({ error: 'Missing or invalid recipient' });
-    }
-    const token = typeof body.token === 'string' ? body.token.toUpperCase() : '';
-    if (!['SOL', 'USDC', 'YESA'].includes(token)) {
-      return res.status(400).json({ error: 'Invalid token; use SOL, USDC, or YESA' });
-    }
-    const amount = Number(body.amount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Invalid amount' });
-    }
-    // Relayer cannot decrypt wallet-encrypted notes without user key. Return 501 until password-based or relayer-decrypt flow exists.
-    return res.status(501).json({
-      error: 'Withdraw by note is not yet supported by this relayer. Notes are encrypted with your wallet; use Connect Wallet to withdraw.',
-    });
-  } catch (err: unknown) {
-    console.error('Withdraw by-note error:', err);
-    return res.status(500).json({ error: 'Failed to process withdraw by note' });
-  }
-});
-
 router.post('/', async (req, res) => {
   try {
+    if (typeof req.body !== 'object' || req.body === null || Array.isArray(req.body)) {
+      return res.status(400).json({ error: 'Invalid request body' });
+    }
     const body = req.body as WithdrawRequestBody;
 
     if (body.signedTransaction) {
@@ -205,6 +173,15 @@ router.post('/', async (req, res) => {
 
     const relayerKeypair = getRelayerKeypair();
     if (relayerKeypair && body.senderAddress === relayerKeypair.publicKey.toBase58()) {
+      // Relayer pays tx fees; ensure it has enough SOL for rent + fees (avoid "insufficient funds for rent")
+      const MIN_RELAYER_LAMPORTS = 10_000_000; // 0.01 SOL
+      const relayerBalance = await connection.getBalance(relayerKeypair.publicKey);
+      if (relayerBalance < MIN_RELAYER_LAMPORTS) {
+        return res.status(503).json({
+          error: 'Relayer has insufficient SOL to pay transaction fees. Fund the relayer wallet with at least 0.01 SOL.',
+          relayerAddress: relayerKeypair.publicKey.toBase58(),
+        });
+      }
       transaction.sign([relayerKeypair]);
       const signature = await connection.sendTransaction(transaction, {
         skipPreflight: false,
@@ -218,6 +195,13 @@ router.post('/', async (req, res) => {
     res.json({ transaction: Buffer.from(serialized).toString('base64') });
   } catch (error: unknown) {
     console.error('Withdraw error:', error);
+    const err = error as { message?: string; transactionMessage?: string };
+    const msg = err.transactionMessage ?? err.message ?? '';
+    if (msg.includes('insufficient funds for rent')) {
+      return res.status(503).json({
+        error: 'Relayer has insufficient SOL for transaction fees and rent. Fund the relayer wallet (see server logs for address).',
+      });
+    }
     res.status(500).json({ error: 'Failed to process withdraw' });
   }
 });

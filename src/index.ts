@@ -75,7 +75,6 @@ app.listen(config.port, () => {
   console.log('  POST /deposit/spl');
   console.log('  GET  /withdraw/relayer-address');
   console.log('  POST /withdraw');
-  console.log('  POST /withdraw/by-note');
   console.log('  POST /withdraw/spl');
   startIndexer();
 });

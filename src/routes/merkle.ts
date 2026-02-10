@@ -173,7 +173,7 @@ router.get('/proof/:commitment', async (req: Request<{ commitment: string }, obj
       });
     }
 
-    const path = await getPathForLeafIndex(db, token, Number(commitmentRow.commitment_index));
+    const leafIndex = Number(commitmentRow.commitment_index);
     const rootData = await fetchMerkleTreeState(getMintFromToken(token));
     if (rootData === null) {
       return res.status(404).json({
@@ -182,7 +182,23 @@ router.get('/proof/:commitment', async (req: Request<{ commitment: string }, obj
         token,
       });
     }
-    res.json({ pathElements: path.pathElements, pathIndices: path.pathIndices, root: rootData.root });
+
+    const { data: commitmentsRows } = await db
+      .from('commitments')
+      .select('commitment_index, commitment')
+      .eq('token', token)
+      .order('commitment_index', { ascending: true });
+    const commitments = (commitmentsRows ?? []).map((r) => ({
+      commitment_index: Number(r.commitment_index),
+      commitment: r.commitment as string,
+    }));
+
+    res.json({
+      leafIndex,
+      root: rootData.root,
+      nextIndex: rootData.nextIndex,
+      commitments,
+    });
   } catch (error) {
     console.error('Merkle proof error:', error);
     res.status(500).json({ error: 'Failed to fetch merkle proof' });

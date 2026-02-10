@@ -143,6 +143,9 @@ function validateWithdrawSplBuildParams(body: WithdrawSplRequestBody): string | 
 
 router.post('/', async (req, res) => {
   try {
+    if (typeof req.body !== 'object' || req.body === null || Array.isArray(req.body)) {
+      return res.status(400).json({ error: 'Invalid request body' });
+    }
     const body = req.body as WithdrawSplRequestBody;
 
     if (body.signedTransaction) {
@@ -194,10 +197,22 @@ router.post('/', async (req, res) => {
       TOKEN_PROGRAM_ID,
       ASSOCIATED_TOKEN_PROGRAM_ID
     );
-    const instructions =
-      recipientAtaInfo == null
-        ? [computeIx, createRecipientAtaIx, withdrawIx]
-        : [computeIx, withdrawIx];
+    const signerTokenAccount = new PublicKey(body.signerTokenAccount ?? getAssociatedTokenAddressSync(mint, payer));
+    const signerAtaInfo = await connection.getAccountInfo(signerTokenAccount);
+    const createSignerAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+      payer,
+      signerTokenAccount,
+      payer,
+      mint,
+      TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+    const instructions = [
+      computeIx,
+      ...(recipientAtaInfo == null ? [createRecipientAtaIx] : []),
+      ...(signerAtaInfo == null ? [createSignerAtaIx] : []),
+      withdrawIx,
+    ];
 
     // Address Lookup Table (ALT) is required to stay under 1232 bytes: without it, 15 accounts
     // are encoded as 32 bytes each (~480 bytes) instead of 1-byte indices (~15 bytes).
@@ -241,6 +256,14 @@ router.post('/', async (req, res) => {
 
     const relayerKeypair = getRelayerKeypair();
     if (relayerKeypair && body.senderAddress === relayerKeypair.publicKey.toBase58()) {
+      const MIN_RELAYER_LAMPORTS = 10_000_000; // 0.01 SOL for tx fees and rent
+      const relayerBalance = await connection.getBalance(relayerKeypair.publicKey);
+      if (relayerBalance < MIN_RELAYER_LAMPORTS) {
+        return res.status(503).json({
+          error: 'Relayer has insufficient SOL to pay transaction fees. Fund the relayer wallet with at least 0.01 SOL.',
+          relayerAddress: relayerKeypair.publicKey.toBase58(),
+        });
+      }
       transaction.sign([relayerKeypair]);
       const signature = await connection.sendTransaction(transaction, {
         skipPreflight: false,
@@ -253,12 +276,15 @@ router.post('/', async (req, res) => {
     res.json({ transaction: Buffer.from(serialized).toString('base64') });
   } catch (error: unknown) {
     console.error('Withdraw SPL error:', error);
+    const err = error as { message?: string; transactionMessage?: string };
+    const msg = err.transactionMessage ?? err.message ?? '';
+    if (msg.includes('insufficient funds for rent')) {
+      return res.status(503).json({
+        error: 'Relayer has insufficient SOL for transaction fees and rent. Fund the relayer wallet.',
+      });
+    }
     const message =
-      error && typeof error === 'object' && 'transactionMessage' in error
-        ? String((error as { transactionMessage?: string }).transactionMessage)
-        : error instanceof Error
-          ? error.message
-          : 'Failed to process withdraw';
+      err.transactionMessage ?? (error instanceof Error ? error.message : 'Failed to process withdraw');
     res.status(500).json({ error: message });
   }
 });
