@@ -15,7 +15,6 @@ const router = Router();
 const MAX_TX_SIZE_RAW = 1232;
 
 interface WithdrawSplRequestBody {
-  signedTransaction?: string;
   serializedProof?: string;
   treeAccount?: string;
   nullifier0PDA?: string;
@@ -28,9 +27,7 @@ interface WithdrawSplRequestBody {
   treeAta?: string;
   feeRecipientTokenAccount?: string;
   mintAddress?: string;
-  signerTokenAccount?: string;
   lookupTableAddress?: string;
-  senderAddress?: string;
 }
 
 async function buildWithdrawSplInstruction(params: WithdrawSplRequestBody): Promise<TransactionInstruction> {
@@ -47,7 +44,6 @@ async function buildWithdrawSplInstruction(params: WithdrawSplRequestBody): Prom
     treeAta,
     feeRecipientTokenAccount,
     mintAddress,
-    senderAddress,
   } = params;
 
   if (
@@ -62,20 +58,21 @@ async function buildWithdrawSplInstruction(params: WithdrawSplRequestBody): Prom
     !recipientAta ||
     !treeAta ||
     !feeRecipientTokenAccount ||
-    !mintAddress ||
-    !senderAddress
+    !mintAddress
   ) {
     throw new Error('Missing required withdraw SPL parameters');
   }
 
+  const relayerKeypair = getRelayerKeypair();
+  if (!relayerKeypair) {
+    throw new Error('Relayer not configured; cannot build SPL withdraw instruction');
+  }
   const { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = await import(
     '@solana/spl-token'
   );
   const mint = new PublicKey(mintAddress);
-  const signerPubkey = new PublicKey(senderAddress);
-  const signerTokenAccount = params.signerTokenAccount
-    ? new PublicKey(params.signerTokenAccount)
-    : getAssociatedTokenAddressSync(mint, signerPubkey);
+  const signerPubkey = relayerKeypair.publicKey;
+  const signerTokenAccount = getAssociatedTokenAddressSync(mint, signerPubkey);
 
   const instructionData = Buffer.from(serializedProof, 'base64');
 
@@ -117,7 +114,6 @@ function validateWithdrawSplBuildParams(body: WithdrawSplRequestBody): string | 
     body.treeAta,
     body.feeRecipientTokenAccount,
     body.mintAddress,
-    body.senderAddress,
   ];
   if (required.some((r) => !r || typeof r !== 'string')) return 'Missing required parameters';
   const addrs = [
@@ -132,10 +128,8 @@ function validateWithdrawSplBuildParams(body: WithdrawSplRequestBody): string | 
     body.treeAta!,
     body.feeRecipientTokenAccount!,
     body.mintAddress!,
-    body.senderAddress!,
   ];
   if (addrs.some((a) => !isValidSolanaAddress(a))) return 'Invalid address';
-  if (body.signerTokenAccount && !isValidSolanaAddress(body.signerTokenAccount)) return 'Invalid address';
   if (!isValidBase64(body.serializedProof!, 64 * 1024)) return 'Invalid proof';
   if (body.lookupTableAddress && !isValidSolanaAddress(body.lookupTableAddress)) return 'Invalid lookup table address';
   return null;
@@ -148,32 +142,10 @@ router.post('/', async (req, res) => {
     }
     const body = req.body as WithdrawSplRequestBody;
 
-    if (body.signedTransaction) {
-      if (!isValidBase64(body.signedTransaction, MAX_TX_SIZE_RAW)) {
-        return res.status(400).json({ error: 'Invalid transaction' });
-      }
-      const connection = getConnection();
-      const txBuffer = Buffer.from(body.signedTransaction, 'base64');
-      const transaction = VersionedTransaction.deserialize(txBuffer);
-
-      const signature = await connection.sendTransaction(transaction, {
-        skipPreflight: false,
-        preflightCommitment: 'confirmed',
-        maxRetries: 3,
-      });
-
-      return res.json({ signature, success: true });
-    }
-
     const err = validateWithdrawSplBuildParams(body);
     if (err) return res.status(400).json({ error: err });
 
     const connection = getConnection();
-    const instructionData = Buffer.from(body.serializedProof!, 'base64');
-    const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
-    const withdrawIx = await buildWithdrawSplInstruction(body);
-
-    // Ensure recipient ATA exists (program expects AccountNotInitialized otherwise). Only add create instruction when needed to stay under tx size limit.
     const {
       getAssociatedTokenAddressSync,
       createAssociatedTokenAccountIdempotentInstruction,
@@ -183,11 +155,22 @@ router.post('/', async (req, res) => {
     const mint = new PublicKey(body.mintAddress!);
     const recipient = new PublicKey(body.recipient!);
     const recipientAta = new PublicKey(body.recipientAta!);
-    const payer = new PublicKey(body.senderAddress!);
     const derivedRecipientAta = getAssociatedTokenAddressSync(mint, recipient);
     if (!derivedRecipientAta.equals(recipientAta)) {
       return res.status(400).json({ error: 'recipientAta does not match recipient and mint' });
     }
+    const relayerKeypair = getRelayerKeypair();
+    if (!relayerKeypair) {
+      return res.status(503).json({ error: 'Relayer not configured. SPL withdraw requires relayer as signer.' });
+    }
+    const payer = relayerKeypair.publicKey;
+    const signerTokenAccount = getAssociatedTokenAddressSync(mint, payer);
+
+    const instructionData = Buffer.from(body.serializedProof!, 'base64');
+    const computeIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
+    const withdrawIx = await buildWithdrawSplInstruction(body);
+
+    // Ensure recipient ATA exists (program expects AccountNotInitialized otherwise). Only add create instruction when needed to stay under tx size limit.
     const recipientAtaInfo = await connection.getAccountInfo(recipientAta);
     const createRecipientAtaIx = createAssociatedTokenAccountIdempotentInstruction(
       payer,
@@ -197,7 +180,28 @@ router.post('/', async (req, res) => {
       TOKEN_PROGRAM_ID,
       ASSOCIATED_TOKEN_PROGRAM_ID
     );
-    const signerTokenAccount = new PublicKey(body.signerTokenAccount ?? getAssociatedTokenAddressSync(mint, payer));
+    const treeAta = new PublicKey(body.treeAta!);
+    const feeRecipientAta = new PublicKey(body.feeRecipientTokenAccount!);
+
+    // Validate token accounts so program does not fail with InvalidTokenAccount (0x1781)
+    const tokenProgramId = TOKEN_PROGRAM_ID.toBase58();
+    for (const { name, pubkey } of [
+      { name: 'treeAta', pubkey: treeAta },
+      { name: 'feeRecipientTokenAccount', pubkey: feeRecipientAta },
+    ] as const) {
+      const info = await connection.getAccountInfo(pubkey);
+      if (!info) {
+        return res.status(400).json({
+          error: `${name} account does not exist at ${pubkey.toBase58()}. Ensure the pool is initialized for this mint (tree ATA = ATA(mint, treePDA)).`,
+        });
+      }
+      if (info.owner.toBase58() !== tokenProgramId) {
+        return res.status(400).json({
+          error: `${name} is not an SPL token account (owner is ${info.owner.toBase58()}, expected ${tokenProgramId}). Check that treeAta = ATA(mint, treePDA) and feeRecipientTokenAccount = ATA(mint, feeRecipient).`,
+        });
+      }
+    }
+
     const signerAtaInfo = await connection.getAccountInfo(signerTokenAccount);
     const createSignerAtaIx = createAssociatedTokenAccountIdempotentInstruction(
       payer,
@@ -229,7 +233,7 @@ router.post('/', async (req, res) => {
 
     const { blockhash } = await connection.getLatestBlockhash('confirmed');
     const messageV0 = new TransactionMessage({
-      payerKey: new PublicKey(body.senderAddress!),
+      payerKey: payer,
       recentBlockhash: blockhash,
       instructions,
     }).compileToV0Message(
@@ -254,26 +258,21 @@ router.post('/', async (req, res) => {
       });
     }
 
-    const relayerKeypair = getRelayerKeypair();
-    if (relayerKeypair && body.senderAddress === relayerKeypair.publicKey.toBase58()) {
-      const MIN_RELAYER_LAMPORTS = 10_000_000; // 0.01 SOL for tx fees and rent
-      const relayerBalance = await connection.getBalance(relayerKeypair.publicKey);
-      if (relayerBalance < MIN_RELAYER_LAMPORTS) {
-        return res.status(503).json({
-          error: 'Relayer has insufficient SOL to pay transaction fees. Fund the relayer wallet with at least 0.01 SOL.',
-          relayerAddress: relayerKeypair.publicKey.toBase58(),
-        });
-      }
-      transaction.sign([relayerKeypair]);
-      const signature = await connection.sendTransaction(transaction, {
-        skipPreflight: false,
-        preflightCommitment: 'confirmed',
-        maxRetries: 3,
+    const MIN_RELAYER_LAMPORTS = 10_000_000; // 0.01 SOL for tx fees and rent
+    const relayerBalance = await connection.getBalance(relayerKeypair.publicKey);
+    if (relayerBalance < MIN_RELAYER_LAMPORTS) {
+      return res.status(503).json({
+        error: 'Relayer has insufficient SOL to pay transaction fees. Fund the relayer wallet with at least 0.01 SOL.',
+        relayerAddress: relayerKeypair.publicKey.toBase58(),
       });
-      return res.json({ signature, success: true });
     }
-
-    res.json({ transaction: Buffer.from(serialized).toString('base64') });
+    transaction.sign([relayerKeypair]);
+    const signature = await connection.sendTransaction(transaction, {
+      skipPreflight: false,
+      preflightCommitment: 'confirmed',
+      maxRetries: 3,
+    });
+    return res.json({ signature, success: true });
   } catch (error: unknown) {
     console.error('Withdraw SPL error:', error);
     const err = error as { message?: string; transactionMessage?: string };
