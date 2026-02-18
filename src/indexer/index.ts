@@ -74,7 +74,6 @@ const DEVNET_MINT_TO_TOKEN: Record<string, string> = {
   '11111111111111111111111111111112': 'sol',
   [SOL_MINT]: 'sol',
   'DWvrXGqTYq1SW9ey857z1nXBxSxihwxdFyQfaRunsAXa': 'usdc',
-  'EwtK6Bydxsm4vAvvMiEG3ymtkJ7WToRpQdeV45wB1Qpa': 'yesa',
   'GykHjnHqwNsFmyY2wFT1drprpm1SZWR69CKPMUSFZBvH': 'yesa',
 };
 
@@ -86,7 +85,7 @@ const MAINNET_TOKEN_TO_MINT: Record<string, string> = {
 const DEVNET_TOKEN_TO_MINT: Record<string, string> = {
   sol: SOL_MINT,
   usdc: 'DWvrXGqTYq1SW9ey857z1nXBxSxihwxdFyQfaRunsAXa',
-  yesa: 'EwtK6Bydxsm4vAvvMiEG3ymtkJ7WToRpQdeV45wB1Qpa',
+  yesa: 'GykHjnHqwNsFmyY2wFT1drprpm1SZWR69CKPMUSFZBvH',
 };
 
 const MINT_TO_TOKEN = config.isDevnet ? DEVNET_MINT_TO_TOKEN : MAINNET_MINT_TO_TOKEN;

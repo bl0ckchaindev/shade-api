@@ -13,7 +13,7 @@ function getCorsOrigins(): string[] | '*' {
 export const config = {
   rpcUrl: process.env.RPC_URL ?? 'https://api.devnet.solana.com',
   isDevnet,
-  programId: new PublicKey(process.env.PROGRAM_ID ?? 'AC3k4mMzmKHEVMt2Lpr7HwiwqeBth3BfSvvbL8XfpR4G'),
+  programId: new PublicKey(process.env.PROGRAM_ID ?? '49JYv2nPJK4XQ9mK1TVGNGcF26KtuwQobrKtghkxvqHq'),
   relayerKeypairPath: process.env.RELAYER_KEYPAIR_PATH ?? './relayer-keypair.json',
   altAddress: new PublicKey(process.env.ALT_ADDRESS ?? '7R5yXHwPZb8bL4DSLqXB3WWgGcAh7TGePJUzNGxzncyB'),
   feeRecipient: new PublicKey(process.env.FEE_RECIPIENT ?? '37aE2MTeWyDLogD4KbBHmLp9A2XWddqfTbAAfWfQYm7U'),
